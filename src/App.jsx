@@ -260,8 +260,11 @@ function AppInterno({ onLogout }) {
       // Merge por nome + registrar visita automaticamente se tratativa mudou
       const merged = [...clientes];
       const novasVisitas = [];
-      const clientesParaSalvar = [];
       let added = 0, updated = 0;
+
+      // Separar em 2 listas: novos (INSERT) e existentes (UPDATE)
+      const clientesNovos = []; // sem id - Supabase vai gerar
+      const clientesAtualizados = []; // com id - faz UPDATE
 
       novosDeduplicados.forEach(n => {
         const idx = merged.findIndex(c => c.nome.trim().toLowerCase() === n.nome.trim().toLowerCase());
@@ -278,30 +281,56 @@ function AppInterno({ onLogout }) {
           }
           const atualizado = { ...antigo, ...n, id: antigo.id };
           merged[idx] = atualizado;
-          clientesParaSalvar.push(atualizado);
+          clientesAtualizados.push(atualizado);
           updated++;
         } else {
-          // Novo cliente - sem id, Supabase gera
-          const { id, ...semId } = n;
-          clientesParaSalvar.push(semId);
+          // Novo cliente - remove campos vazios de id pra nao dar conflito
+          const novoLimpo = {
+            num: n.num,
+            nome: n.nome,
+            endereco: n.endereco,
+            rua: n.rua,
+            bairro: n.bairro,
+            cidade: n.cidade,
+            cep: n.cep,
+            comprador: n.comprador,
+            telefone: n.telefone,
+            tratativa: n.tratativa,
+            categoria: n.categoria,
+            status: 'ativo'
+          };
+          clientesNovos.push(novoLimpo);
           added++;
         }
       });
 
       try {
         setSaveStatus('saving');
-        // Salvar clientes em lote
-        const salvos = await db.inserirClientesLote(clientesParaSalvar);
-        // Salvar visitas novas
+
+        // 1. Inserir clientes novos (INSERT em lote)
+        if (clientesNovos.length > 0) {
+          const { error: errInsert } = await db.supabase.from('clientes').insert(clientesNovos);
+          if (errInsert) throw errInsert;
+        }
+
+        // 2. Atualizar clientes existentes (UPDATE um por um)
+        for (const c of clientesAtualizados) {
+          const { id, ...dadosSemId } = c;
+          const { error: errUpdate } = await db.supabase.from('clientes').update(dadosSemId).eq('id', id);
+          if (errUpdate) throw errUpdate;
+        }
+
+        // 3. Salvar visitas novas
         if (novasVisitas.length > 0) {
           for (const v of novasVisitas) {
             await db.registrarVisita(v);
           }
         }
-        // Recarregar do banco pra ter IDs corretos
+
+        // 4. Recarregar do banco pra ter IDs corretos
         const [cli, vis] = await Promise.all([db.carregarClientes(), db.carregarVisitas()]);
         setClientes(cli);
-        setVisitas(vis);
+        setVisitas(vis.map(v => ({ ...v, clienteId: v.cliente_id })));
         setSaveStatus('saved');
         setUploadMsg(`✓ ${added} novos · ${updated} atualizados · ${novasVisitas.length} visitas registradas${duplicadasIgnoradas > 0 ? ` · ${duplicadasIgnoradas} duplicada${duplicadasIgnoradas !== 1 ? 's' : ''} na planilha ignorada${duplicadasIgnoradas !== 1 ? 's' : ''}` : ''}`);
         setTimeout(() => { setShowUpload(false); setUploadMsg(''); setSaveStatus(''); }, 2500);
