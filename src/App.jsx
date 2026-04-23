@@ -241,13 +241,29 @@ function AppInterno({ onLogout }) {
           };
         });
 
+      // DEDUPE: se a planilha tem o mesmo cliente repetido, mantém só a última aparição
+      // (que geralmente tem a tratativa mais recente)
+      const novosDeduplicados = [];
+      const vistos = new Map(); // nome normalizado -> índice no array
+      novos.forEach(n => {
+        const key = n.nome.trim().toLowerCase();
+        if (vistos.has(key)) {
+          // Substitui a anterior pela mais recente
+          novosDeduplicados[vistos.get(key)] = n;
+        } else {
+          vistos.set(key, novosDeduplicados.length);
+          novosDeduplicados.push(n);
+        }
+      });
+      const duplicadasIgnoradas = novos.length - novosDeduplicados.length;
+
       // Merge por nome + registrar visita automaticamente se tratativa mudou
       const merged = [...clientes];
       const novasVisitas = [];
       const clientesParaSalvar = [];
       let added = 0, updated = 0;
 
-      novos.forEach(n => {
+      novosDeduplicados.forEach(n => {
         const idx = merged.findIndex(c => c.nome.trim().toLowerCase() === n.nome.trim().toLowerCase());
         if (idx >= 0) {
           const antigo = merged[idx];
@@ -287,7 +303,7 @@ function AppInterno({ onLogout }) {
         setClientes(cli);
         setVisitas(vis);
         setSaveStatus('saved');
-        setUploadMsg(`✓ ${added} novos · ${updated} atualizados · ${novasVisitas.length} visitas registradas`);
+        setUploadMsg(`✓ ${added} novos · ${updated} atualizados · ${novasVisitas.length} visitas registradas${duplicadasIgnoradas > 0 ? ` · ${duplicadasIgnoradas} duplicada${duplicadasIgnoradas !== 1 ? 's' : ''} na planilha ignorada${duplicadasIgnoradas !== 1 ? 's' : ''}` : ''}`);
         setTimeout(() => { setShowUpload(false); setUploadMsg(''); setSaveStatus(''); }, 2500);
       } catch (err) {
         console.error('Erro ao salvar upload:', err);
@@ -456,6 +472,100 @@ function AppInterno({ onLogout }) {
     XLSX.writeFile(wb, `clientes_${new Date().toISOString().slice(0,10)}.xlsx`);
   };
 
+  const fazerBackupCompleto = () => {
+    const CAT_LABELS = { 'A': 'Grande', 'B': 'Médio', 'C': 'Pequeno' };
+    const RESULTADO_LABELS = {
+      'compra': 'Compra realizada',
+      'interesse': 'Interesse',
+      'revisita': 'Agendar revisita',
+      'sem_interesse': 'Sem interesse'
+    };
+
+    // Mapear cliente_id -> nome pra facilitar a leitura
+    const nomePorId = {};
+    clientes.forEach(c => { nomePorId[c.id] = c.nome; });
+
+    // Aba 1: Clientes (todos os campos)
+    const wsClientes = XLSX.utils.json_to_sheet(clientes.map(c => ({
+      'ID': c.id,
+      'NÚMERO': c.num,
+      'NOME': c.nome,
+      'ENDEREÇO COMPLETO': c.endereco,
+      'RUA': c.rua,
+      'BAIRRO': c.bairro,
+      'CIDADE': c.cidade,
+      'CEP': c.cep,
+      'COMPRADOR': c.comprador,
+      'TELEFONE': c.telefone,
+      'CATEGORIA': CAT_LABELS[c.categoria] || c.categoria,
+      'TRATATIVA / OBSERVAÇÕES': c.tratativa,
+      'STATUS': c.status
+    })));
+
+    // Aba 2: Visitas realizadas
+    const wsVisitas = XLSX.utils.json_to_sheet(
+      visitas.sort((a, b) => new Date(b.data) - new Date(a.data)).map(v => {
+        const d = new Date(v.data);
+        return {
+          'DATA': d.toLocaleDateString('pt-BR'),
+          'HORA': d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+          'CLIENTE': nomePorId[v.clienteId] || '(cliente removido)',
+          'RESULTADO': RESULTADO_LABELS[v.resultado] || v.resultado,
+          'OBSERVAÇÕES': v.obs,
+          'ORIGEM': v.origem === 'manual' ? 'Registro manual' : (v.origem === 'import' ? 'Planilha importada' : v.origem)
+        };
+      })
+    );
+
+    // Aba 3: Agendamentos
+    const wsAgenda = XLSX.utils.json_to_sheet(
+      agenda.sort((a, b) => a.data.localeCompare(b.data)).map(a => ({
+        'DATA': new Date(a.data + 'T12:00').toLocaleDateString('pt-BR'),
+        'HORA': a.hora,
+        'CLIENTE': nomePorId[a.clienteId] || '(cliente removido)',
+        'OBSERVAÇÕES': a.obs,
+        'STATUS': a.feita ? 'Realizado' : 'Pendente'
+      }))
+    );
+
+    // Aba 4: Resumo
+    const totalVisitas = visitas.length;
+    const totalAgendamentos = agenda.length;
+    const agendamentosPendentes = agenda.filter(a => !a.feita).length;
+    const porCategoria = clientes.reduce((acc, c) => {
+      const cat = CAT_LABELS[c.categoria] || 'Sem categoria';
+      acc[cat] = (acc[cat] || 0) + 1;
+      return acc;
+    }, {});
+    const wsResumo = XLSX.utils.json_to_sheet([
+      { 'INFORMAÇÃO': 'Data do backup', 'VALOR': new Date().toLocaleString('pt-BR') },
+      { 'INFORMAÇÃO': 'Total de clientes', 'VALOR': clientes.length },
+      { 'INFORMAÇÃO': 'Clientes Grande', 'VALOR': porCategoria['Grande'] || 0 },
+      { 'INFORMAÇÃO': 'Clientes Médio', 'VALOR': porCategoria['Médio'] || 0 },
+      { 'INFORMAÇÃO': 'Clientes Pequeno', 'VALOR': porCategoria['Pequeno'] || 0 },
+      { 'INFORMAÇÃO': 'Total de visitas registradas', 'VALOR': totalVisitas },
+      { 'INFORMAÇÃO': 'Total de agendamentos', 'VALOR': totalAgendamentos },
+      { 'INFORMAÇÃO': 'Agendamentos pendentes', 'VALOR': agendamentosPendentes }
+    ]);
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, wsResumo, 'Resumo');
+    XLSX.utils.book_append_sheet(wb, wsClientes, 'Clientes');
+    XLSX.utils.book_append_sheet(wb, wsVisitas, 'Visitas');
+    XLSX.utils.book_append_sheet(wb, wsAgenda, 'Agenda');
+
+    const hoje = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(wb, `backup_rota_vendas_${hoje}.xlsx`);
+
+    // Salva a data do último backup
+    try {
+      localStorage.setItem('rota_ultimo_backup', new Date().toISOString());
+    } catch {}
+
+    setSaveStatus('saved');
+    setTimeout(() => setSaveStatus(''), 3000);
+  };
+
   return (
     <div style={{ fontFamily: "'Inter', -apple-system, sans-serif", background: '#FAFAF7', minHeight: '100vh' }}>
       {loading && (
@@ -610,6 +720,44 @@ function AppInterno({ onLogout }) {
             </div>
 
             <button className="btn-primary" onClick={() => setShowConfig(false)} style={{ width: '100%' }}>Salvar</button>
+
+            <div style={{ marginTop: 24, paddingTop: 20, borderTop: '1px solid #E5E3DC' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                <Download size={16} />
+                <label style={{ fontSize: 13, fontWeight: 600 }}>Backup completo</label>
+              </div>
+              <p style={{ fontSize: 12, color: '#888780', margin: '0 0 12px', lineHeight: 1.5 }}>
+                Baixa um Excel com TUDO: clientes, visitas e agendamentos. Guarde na nuvem (Google Drive, iCloud) pra segurança.
+              </p>
+              {(() => {
+                try {
+                  const ultimoBackup = localStorage.getItem('rota_ultimo_backup');
+                  if (!ultimoBackup) {
+                    return (
+                      <div style={{ fontSize: 12, color: '#BA7517', marginBottom: 10, padding: 8, background: '#FAEEDA', borderRadius: 6 }}>
+                        ⚠️ Você ainda não fez nenhum backup. Recomendamos fazer agora.
+                      </div>
+                    );
+                  }
+                  const dias = Math.floor((Date.now() - new Date(ultimoBackup).getTime()) / (1000 * 60 * 60 * 24));
+                  if (dias >= 30) {
+                    return (
+                      <div style={{ fontSize: 12, color: '#791F1F', marginBottom: 10, padding: 8, background: '#FCEBEB', borderRadius: 6 }}>
+                        ⚠️ Último backup há {dias} dias — recomendado fazer um novo!
+                      </div>
+                    );
+                  }
+                  return (
+                    <div style={{ fontSize: 12, color: '#27500A', marginBottom: 10 }}>
+                      ✓ Último backup há {dias === 0 ? 'menos de 1 dia' : `${dias} dia${dias !== 1 ? 's' : ''}`}
+                    </div>
+                  );
+                } catch { return null; }
+              })()}
+              <button onClick={fazerBackupCompleto} className="btn-secondary" style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                <Download size={14} /> Fazer backup agora
+              </button>
+            </div>
 
             <div style={{ marginTop: 20, paddingTop: 20, borderTop: '1px solid #E5E3DC' }}>
               <button onClick={() => { if (confirm('Deseja sair do app? Você precisará digitar a senha novamente.')) { setShowConfig(false); onLogout(); } }}
@@ -1398,7 +1546,12 @@ function Sugestoes({ clientes, visitas, agenda, visitasPorDia, onSelect, onAgend
   };
 
   const resetarSugestoes = () => {
-    setDias(roteiroInicial);
+    if (!confirm('Isso vai recriar o roteiro automático com os clientes mais prioritários. Continuar?')) return;
+    // Força recriação: zera primeiro, depois recalcula
+    setDias([[], [], [], [], []]);
+    setTimeout(() => {
+      setDias(roteiroInicial);
+    }, 50);
   };
 
   const diasPreenchidos = dias.filter(d => d.length > 0).length;
@@ -1433,6 +1586,15 @@ function Sugestoes({ clientes, visitas, agenda, visitasPorDia, onSelect, onAgend
           As sugestões combinam <strong>categoria</strong> (Grande {'>'} Médio {'>'} Pequeno), <strong>interesse do cliente</strong>, <strong>tempo sem contato</strong> e <strong>agrupamento por região</strong>. <strong>Arraste um cliente</strong> entre os dias pra ajustar o roteiro à sua preferência.
         </div>
       </div>
+
+      {/* Aviso quando tem poucas sugestões */}
+      {sugestoesBase.length < visitasPorDia * 5 && (
+        <div className="card" style={{ padding: 16, marginBottom: 16, background: '#FAEEDA', borderLeft: '3px solid #BA7517' }}>
+          <div style={{ fontSize: 13, color: '#633806', lineHeight: 1.5 }}>
+            <strong>Por que tem poucas sugestões?</strong> O app encontrou apenas <strong>{sugestoesBase.length} cliente{sugestoesBase.length !== 1 ? 's' : ''}</strong> disponível{sugestoesBase.length !== 1 ? 'is' : ''} para sugerir. Isso acontece quando a maioria dos clientes já está agendada, foi visitada recentemente, ou marcada como "Sem interesse". {agenda.filter(a => !a.feita).length > 0 && <>Você tem <strong>{agenda.filter(a => !a.feita).length} agendamento{agenda.filter(a => !a.feita).length !== 1 ? 's' : ''} ativo{agenda.filter(a => !a.feita).length !== 1 ? 's' : ''}</strong> na Agenda.</>}
+          </div>
+        </div>
+      )}
 
       {/* Cabeçalho com ações */}
       {totalVisitas > 0 && (
