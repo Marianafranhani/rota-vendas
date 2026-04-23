@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { MapPin, Users, Calendar, Upload, Phone, Search, ChevronRight, TrendingUp, Clock, CheckCircle2, X, Download, Map, BarChart3, Navigation, Star, AlertCircle, FileText, ChevronLeft, Sparkles, CalendarDays, Settings } from 'lucide-react';
+import { MapPin, Users, Calendar, Upload, Phone, Search, ChevronRight, TrendingUp, Clock, CheckCircle2, X, Download, Map, BarChart3, Navigation, Star, AlertCircle, FileText, ChevronLeft, Sparkles, CalendarDays, Settings, Trash2 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import * as db from './supabase';
 
@@ -15,9 +15,9 @@ const CITY_COLORS = {
 };
 
 const CAT_STYLES = {
-  'A': { bg: '#EAF3DE', text: '#27500A', border: '#639922', label: 'Alto potencial' },
-  'B': { bg: '#FAEEDA', text: '#633806', border: '#BA7517', label: 'Em negociação' },
-  'C': { bg: '#FCEBEB', text: '#791F1F', border: '#E24B4A', label: 'Prospecção' }
+  'A': { bg: '#EAF3DE', text: '#27500A', border: '#639922', label: 'Grande', curto: 'G' },
+  'B': { bg: '#FAEEDA', text: '#633806', border: '#BA7517', label: 'Médio', curto: 'M' },
+  'C': { bg: '#FCEBEB', text: '#791F1F', border: '#E24B4A', label: 'Pequeno', curto: 'P' }
 };
 
 function parseAddress(addr) {
@@ -69,6 +69,46 @@ function formatarSemana(ano, semana) {
 }
 
 export default function App() {
+  const [autenticado, setAutenticado] = useState(() => {
+    // Verifica no navegador se já está autenticado (expira em 30 dias)
+    try {
+      const dados = localStorage.getItem('rota_auth');
+      if (!dados) return false;
+      const { expira } = JSON.parse(dados);
+      if (Date.now() > expira) {
+        localStorage.removeItem('rota_auth');
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  const handleLogin = (senha) => {
+    const senhaCorreta = import.meta.env.VITE_APP_PASSWORD || '17195477';
+    if (senha === senhaCorreta) {
+      const trintaDias = 30 * 24 * 60 * 60 * 1000;
+      localStorage.setItem('rota_auth', JSON.stringify({ expira: Date.now() + trintaDias }));
+      setAutenticado(true);
+      return true;
+    }
+    return false;
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('rota_auth');
+    setAutenticado(false);
+  };
+
+  if (!autenticado) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
+
+  return <AppInterno onLogout={handleLogout} />;
+}
+
+function AppInterno({ onLogout }) {
   const [view, setView] = useState('dashboard');
   const [clientes, setClientes] = useState(INITIAL_DATA);
   const [visitas, setVisitas] = useState([]);
@@ -104,6 +144,7 @@ export default function App() {
   const [uploadMsg, setUploadMsg] = useState('');
   const [visitasPorDia, setVisitasPorDia] = useState(6);
   const [showConfig, setShowConfig] = useState(false);
+  const [showClienteForm, setShowClienteForm] = useState(false); // 'novo' | { ...cliente } (pra editar) | false
 
   // Sincroniza selectedClient com clientes quando atualiza
   useEffect(() => {
@@ -258,10 +299,10 @@ export default function App() {
     }
   };
 
-  const registrarVisita = async (clienteId, obs, resultado) => {
+  const registrarVisita = async (clienteId, obs, resultado, dataCustom = null) => {
     const v = {
       cliente_id: clienteId,
-      data: new Date().toISOString(),
+      data: dataCustom || new Date().toISOString(),
       obs,
       resultado,
       origem: 'manual'
@@ -307,12 +348,94 @@ export default function App() {
     }
   };
 
+  const excluirVisita = async (visitaId) => {
+    if (!confirm('Tem certeza que deseja excluir esta visita? Esta ação não pode ser desfeita.')) return;
+    try {
+      setSaveStatus('saving');
+      const { error } = await db.supabase.from('visitas').delete().eq('id', visitaId);
+      if (error) throw error;
+      setVisitas(prev => prev.filter(v => v.id !== visitaId));
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus(''), 2000);
+    } catch (err) {
+      console.error('Erro ao excluir visita:', err);
+      setSaveStatus('error');
+    }
+  };
+
+  const excluirAgendamento = async (agendaId) => {
+    if (!confirm('Tem certeza que deseja excluir este agendamento?')) return;
+    try {
+      setSaveStatus('saving');
+      const { error } = await db.supabase.from('agenda').delete().eq('id', agendaId);
+      if (error) throw error;
+      setAgenda(prev => prev.filter(a => a.id !== agendaId));
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus(''), 2000);
+    } catch (err) {
+      console.error('Erro ao excluir agendamento:', err);
+      setSaveStatus('error');
+    }
+  };
+
   const atualizarCategoria = async (clienteId, novaCat) => {
     try {
       await db.atualizarCategoria(clienteId, novaCat);
       setClientes(prev => prev.map(c => c.id === clienteId ? { ...c, categoria: novaCat } : c));
     } catch (err) {
       console.error('Erro ao atualizar categoria:', err);
+    }
+  };
+
+  const criarCliente = async (dadosCliente) => {
+    try {
+      setSaveStatus('saving');
+      // Próximo num disponível
+      const maxNum = clientes.reduce((max, c) => Math.max(max, c.num || 0), 0);
+      const novo = {
+        num: maxNum + 1,
+        nome: dadosCliente.nome,
+        endereco: dadosCliente.endereco || '',
+        rua: dadosCliente.rua || '',
+        bairro: dadosCliente.bairro || '',
+        cidade: dadosCliente.cidade || '',
+        cep: dadosCliente.cep || '',
+        comprador: dadosCliente.comprador || '',
+        telefone: dadosCliente.telefone || '',
+        tratativa: dadosCliente.tratativa || '',
+        categoria: dadosCliente.categoria || 'C',
+        status: 'ativo'
+      };
+      const { data, error } = await db.supabase.from('clientes').insert(novo).select().single();
+      if (error) throw error;
+      setClientes(prev => [...prev, data]);
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus(''), 2000);
+      return data;
+    } catch (err) {
+      console.error('Erro ao criar cliente:', err);
+      setSaveStatus('error');
+      if (err.message?.includes('duplicate')) {
+        alert('Já existe um cliente com esse nome. Use um nome único.');
+      } else {
+        alert('Erro ao criar cliente: ' + (err.message || 'tente novamente'));
+      }
+      return null;
+    }
+  };
+
+  const editarCliente = async (clienteId, dadosAtualizados) => {
+    try {
+      setSaveStatus('saving');
+      const { error } = await db.supabase.from('clientes').update(dadosAtualizados).eq('id', clienteId);
+      if (error) throw error;
+      setClientes(prev => prev.map(c => c.id === clienteId ? { ...c, ...dadosAtualizados } : c));
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus(''), 2000);
+    } catch (err) {
+      console.error('Erro ao editar cliente:', err);
+      setSaveStatus('error');
+      alert('Erro ao editar cliente: ' + (err.message || 'tente novamente'));
     }
   };
 
@@ -437,12 +560,12 @@ export default function App() {
           </div>
 
           {view === 'dashboard' && <Dashboard stats={stats} clientes={clientes} agenda={agenda} visitas={visitas} onSelectClient={setSelectedClient} setView={setView} />}
-          {view === 'clientes' && <ClientesList clientes={filtered} cidades={cidades} filtros={filtros} setFiltros={setFiltros} onSelect={setSelectedClient} total={clientes.length} />}
+          {view === 'clientes' && <ClientesList clientes={filtered} cidades={cidades} filtros={filtros} setFiltros={setFiltros} onSelect={setSelectedClient} total={clientes.length} onNovoCliente={() => setShowClienteForm('novo')} />}
           {view === 'mapa' && <Regioes clientes={clientes} stats={stats} onSelect={setSelectedClient} />}
           {view === 'sugestoes' && <Sugestoes clientes={clientes} visitas={visitas} agenda={agenda} visitasPorDia={visitasPorDia} onSelect={setSelectedClient} onAgendar={agendarVisita} setShowConfig={setShowConfig} />}
           {view === 'calendario' && <Calendario visitas={visitas} agenda={agenda} clientes={clientes} onSelectClient={setSelectedClient} />}
           {view === 'relatorio' && <Relatorio visitas={visitas} clientes={clientes} onSelectClient={setSelectedClient} />}
-          {view === 'agenda' && <Agenda agenda={agenda} clientes={clientes} onMarcarFeita={marcarFeita} onSelectClient={setSelectedClient} />}
+          {view === 'agenda' && <Agenda agenda={agenda} clientes={clientes} onMarcarFeita={marcarFeita} onSelectClient={setSelectedClient} onExcluir={excluirAgendamento} />}
         </main>
       </div>
 
@@ -452,9 +575,12 @@ export default function App() {
           onClose={() => setSelectedClient(null)}
           visitas={visitas.filter(v => v.clienteId === selectedClient.id)}
           agendamentos={agenda.filter(a => a.clienteId === selectedClient.id && !a.feita)}
-          onRegistrarVisita={(obs, res) => registrarVisita(selectedClient.id, obs, res)}
+          onRegistrarVisita={(obs, res, data) => registrarVisita(selectedClient.id, obs, res, data)}
           onAgendar={(data, hora, obs) => agendarVisita(selectedClient.id, data, hora, obs)}
           onUpdateCategoria={(cat) => atualizarCategoria(selectedClient.id, cat)}
+          onExcluirVisita={excluirVisita}
+          onExcluirAgendamento={excluirAgendamento}
+          onEditar={() => setShowClienteForm(selectedClient)}
         />
       )}
 
@@ -484,8 +610,34 @@ export default function App() {
             </div>
 
             <button className="btn-primary" onClick={() => setShowConfig(false)} style={{ width: '100%' }}>Salvar</button>
+
+            <div style={{ marginTop: 20, paddingTop: 20, borderTop: '1px solid #E5E3DC' }}>
+              <button onClick={() => { if (confirm('Deseja sair do app? Você precisará digitar a senha novamente.')) { setShowConfig(false); onLogout(); } }}
+                style={{ width: '100%', padding: 10, color: '#791F1F', fontSize: 13, fontWeight: 500, borderRadius: 8, border: '1px solid #FCEBEB', background: 'white' }}>
+                Sair do app
+              </button>
+            </div>
           </div>
         </div>
+      )}
+
+      {showClienteForm && (
+        <ClienteForm
+          clienteExistente={showClienteForm === 'novo' ? null : showClienteForm}
+          onClose={() => setShowClienteForm(false)}
+          onSalvar={async (dados) => {
+            if (showClienteForm === 'novo') {
+              const novo = await criarCliente(dados);
+              if (novo) {
+                setShowClienteForm(false);
+                setSelectedClient(novo);
+              }
+            } else {
+              await editarCliente(showClienteForm.id, dados);
+              setShowClienteForm(false);
+            }
+          }}
+        />
       )}
 
       {showUpload && (
@@ -545,8 +697,8 @@ function Dashboard({ stats, clientes, agenda, visitas, onSelectClient, setView }
 
       <div className="grid-cols grid-cols-2" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 32 }}>
         <StatCard label="Carteira" value={stats.total} Icon={Users} color="#1A1A1A" />
-        <StatCard label="Alto potencial" value={stats.porCat.A} Icon={Star} color="#639922" sub="categoria A" />
-        <StatCard label="Em negociação" value={stats.porCat.B} Icon={TrendingUp} color="#BA7517" sub="categoria B" />
+        <StatCard label="Grande" value={stats.porCat.A} Icon={Star} color="#639922" sub="alto potencial" />
+        <StatCard label="Médio" value={stats.porCat.B} Icon={TrendingUp} color="#BA7517" sub="em negociação" />
         <StatCard label="Visitas na semana" value={visitasSemana} Icon={CheckCircle2} color="#378ADD" sub={`${stats.totalVisitas} no total`} />
       </div>
 
@@ -648,12 +800,17 @@ function StatCard({ label, value, Icon, color, sub }) {
 }
 
 // ============ CLIENTES ============
-function ClientesList({ clientes, cidades, filtros, setFiltros, onSelect, total }) {
+function ClientesList({ clientes, cidades, filtros, setFiltros, onSelect, total, onNovoCliente }) {
   return (
     <div>
-      <header style={{ marginBottom: 24 }}>
-        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 700, letterSpacing: '-0.02em' }}>Clientes</h1>
-        <p style={{ margin: '4px 0 0', fontSize: 14, color: '#888780' }}>{clientes.length} de {total} exibidos</p>
+      <header style={{ marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: 28, fontWeight: 700, letterSpacing: '-0.02em' }}>Clientes</h1>
+          <p style={{ margin: '4px 0 0', fontSize: 14, color: '#888780' }}>{clientes.length} de {total} exibidos</p>
+        </div>
+        <button className="btn-primary" onClick={onNovoCliente} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 18, lineHeight: 1 }}>+</span> Novo cliente
+        </button>
       </header>
 
       <div style={{ position: 'relative', marginBottom: 16 }}>
@@ -667,7 +824,7 @@ function ClientesList({ clientes, cidades, filtros, setFiltros, onSelect, total 
         <div style={{ display: 'flex', gap: 6, paddingRight: 12, borderRight: '1px solid #E5E3DC', flexWrap: 'wrap' }}>
           <button className={`chip ${filtros.categoria === 'todas' ? 'active' : ''}`} onClick={() => setFiltros({ ...filtros, categoria: 'todas' })}>Todas</button>
           {['A', 'B', 'C'].map(cat => (
-            <button key={cat} className={`chip ${filtros.categoria === cat ? 'active' : ''}`} onClick={() => setFiltros({ ...filtros, categoria: cat })}>Cat. {cat}</button>
+            <button key={cat} className={`chip ${filtros.categoria === cat ? 'active' : ''}`} onClick={() => setFiltros({ ...filtros, categoria: cat })}>{CAT_STYLES[cat].label}</button>
           ))}
         </div>
         <button className={`chip ${filtros.cidade === 'todas' ? 'active' : ''}`} onClick={() => setFiltros({ ...filtros, cidade: 'todas' })}>Todas cidades</button>
@@ -697,7 +854,7 @@ function ClientCard({ c, onClick }) {
     <div className="card client-card" onClick={onClick} style={{ padding: 16 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
         <div className="badge" style={{ background: cat.bg, color: cat.text }}>
-          {c.categoria === 'A' && <Star size={10} />} {c.categoria}
+          {c.categoria === 'A' && <Star size={10} />} {CAT_STYLES[c.categoria].curto}
         </div>
         <div style={{ fontSize: 10, color: '#888780' }}>#{c.num}</div>
       </div>
@@ -1006,8 +1163,8 @@ function Sugestoes({ clientes, visitas, agenda, visitasPorDia, onSelect, onAgend
       const razoes = [];
 
       // 1. CATEGORIA (peso alto - A=40, B=25, C=10)
-      if (c.categoria === 'A') { score += 40; razoes.push({ tipo: 'cat', texto: 'Alto potencial', cor: '#27500A' }); }
-      else if (c.categoria === 'B') { score += 25; razoes.push({ tipo: 'cat', texto: 'Em negociação', cor: '#633806' }); }
+      if (c.categoria === 'A') { score += 40; razoes.push({ tipo: 'cat', texto: 'Cliente grande', cor: '#27500A' }); }
+      else if (c.categoria === 'B') { score += 25; razoes.push({ tipo: 'cat', texto: 'Cliente médio', cor: '#633806' }); }
       else { score += 10; }
 
       // 2. INTERESSE na tratativa (palavras-chave que sugerem ação necessária)
@@ -1273,7 +1430,7 @@ function Sugestoes({ clientes, visitas, agenda, visitasPorDia, onSelect, onAgend
       <div className="card" style={{ padding: 20, marginBottom: 20, background: 'linear-gradient(135deg, #FAFAF7 0%, #F5F3EC 100%)' }}>
         <div style={{ fontSize: 12, fontWeight: 600, color: '#888780', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Como funciona</div>
         <div style={{ fontSize: 13, color: '#444441', lineHeight: 1.6 }}>
-          As sugestões combinam <strong>categoria</strong> (A {'>'} B {'>'} C), <strong>interesse do cliente</strong>, <strong>tempo sem contato</strong> e <strong>agrupamento por região</strong>. <strong>Arraste um cliente</strong> entre os dias pra ajustar o roteiro à sua preferência.
+          As sugestões combinam <strong>categoria</strong> (Grande {'>'} Médio {'>'} Pequeno), <strong>interesse do cliente</strong>, <strong>tempo sem contato</strong> e <strong>agrupamento por região</strong>. <strong>Arraste um cliente</strong> entre os dias pra ajustar o roteiro à sua preferência.
         </div>
       </div>
 
@@ -1368,7 +1525,7 @@ function Sugestoes({ clientes, visitas, agenda, visitasPorDia, onSelect, onAgend
                         <div style={{ width: 32, height: 32, borderRadius: '50%', background: cidColor.bg, color: cidColor.text, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 13, flexShrink: 0 }}>{idx + 1}</div>
                         <div style={{ flex: 1, minWidth: 0, cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); onSelect(s.cliente); }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, flexWrap: 'wrap' }}>
-                            <div className="badge" style={{ background: cat.bg, color: cat.text }}>{s.cliente.categoria}</div>
+                            <div className="badge" style={{ background: cat.bg, color: cat.text }}>{CAT_STYLES[s.cliente.categoria].curto}</div>
                             <div style={{ fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.cliente.nome}</div>
                           </div>
                           <div style={{ fontSize: 11, color: '#888780', display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
@@ -1646,7 +1803,7 @@ function Calendario({ visitas, agenda, clientes, onSelectClient }) {
 }
 
 // ============ AGENDA ============
-function Agenda({ agenda, clientes, onMarcarFeita, onSelectClient }) {
+function Agenda({ agenda, clientes, onMarcarFeita, onSelectClient, onExcluir }) {
   const agendaFutura = agenda.filter(a => !a.feita);
   const hoje = new Date().toISOString().slice(0,10);
 
@@ -1697,7 +1854,7 @@ function Agenda({ agenda, clientes, onMarcarFeita, onSelectClient }) {
                     <div style={{ fontSize: 16, fontWeight: 600, minWidth: 52, color: '#1A1A1A' }}>{a.hora}</div>
                     <div style={{ flex: 1, minWidth: 0, cursor: 'pointer' }} onClick={() => onSelectClient(c)}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                        <div className="badge" style={{ background: cat.bg, color: cat.text }}>{c.categoria}</div>
+                        <div className="badge" style={{ background: cat.bg, color: cat.text }}>{CAT_STYLES[c.categoria].curto}</div>
                         <div style={{ fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.nome}</div>
                       </div>
                       <div style={{ fontSize: 12, color: '#888780', display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1707,6 +1864,9 @@ function Agenda({ agenda, clientes, onMarcarFeita, onSelectClient }) {
                     </div>
                     <button className="btn-secondary" onClick={() => onMarcarFeita(a.id)} style={{ padding: '8px 14px', fontSize: 13 }}>
                       <CheckCircle2 size={14} style={{ marginRight: 4, display: 'inline' }} /> Feita
+                    </button>
+                    <button onClick={() => onExcluir(a.id)} title="Excluir agendamento" style={{ padding: 8, borderRadius: 8, color: '#791F1F', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <Trash2 size={16} />
                     </button>
                   </div>
                 );
@@ -1720,10 +1880,11 @@ function Agenda({ agenda, clientes, onMarcarFeita, onSelectClient }) {
 }
 
 // ============ CLIENT DETAIL ============
-function ClientDetail({ cliente, onClose, visitas, agendamentos, onRegistrarVisita, onAgendar, onUpdateCategoria }) {
+function ClientDetail({ cliente, onClose, visitas, agendamentos, onRegistrarVisita, onAgendar, onUpdateCategoria, onExcluirVisita, onExcluirAgendamento, onEditar }) {
   const [tab, setTab] = useState('info');
   const [obs, setObs] = useState('');
   const [resultado, setResultado] = useState('interesse');
+  const [dataVisita, setDataVisita] = useState(new Date().toISOString().slice(0,10));
   const [agendaData, setAgendaData] = useState('');
   const [agendaHora, setAgendaHora] = useState('09:00');
   const [agendaObs, setAgendaObs] = useState('');
@@ -1732,8 +1893,13 @@ function ClientDetail({ cliente, onClose, visitas, agendamentos, onRegistrarVisi
 
   const handleRegistrar = () => {
     if (!obs.trim()) return;
-    onRegistrarVisita(obs, resultado);
+    // Converte a data escolhida para ISO completa (mantém horário de agora)
+    const agora = new Date();
+    const [ano, mes, dia] = dataVisita.split('-').map(Number);
+    const dataFinal = new Date(ano, mes - 1, dia, agora.getHours(), agora.getMinutes()).toISOString();
+    onRegistrarVisita(obs, resultado, dataFinal);
     setObs(''); setResultado('interesse');
+    setDataVisita(new Date().toISOString().slice(0,10));
     setTab('info');
   };
 
@@ -1756,12 +1922,19 @@ function ClientDetail({ cliente, onClose, visitas, agendamentos, onRegistrarVisi
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
-                <div className="badge" style={{ background: cat.bg, color: cat.text }}>{cliente.categoria === 'A' && <Star size={10} />} Cat. {cliente.categoria}</div>
+                <div className="badge" style={{ background: cat.bg, color: cat.text }}>{cliente.categoria === 'A' && <Star size={10} />} {CAT_STYLES[cliente.categoria].label}</div>
                 <div className="badge" style={{ background: cidColor.bg, color: cidColor.text }}>{cliente.cidade || 'Outros'}</div>
               </div>
               <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, lineHeight: 1.2, letterSpacing: '-0.01em' }}>{cliente.nome}</h2>
             </div>
-            <button onClick={onClose} style={{ padding: 8, borderRadius: 8, marginLeft: 12 }}><X size={20} /></button>
+            <div style={{ display: 'flex', gap: 4, marginLeft: 12 }}>
+              {onEditar && (
+                <button onClick={onEditar} title="Editar cliente" style={{ padding: 8, borderRadius: 8, fontSize: 13, fontWeight: 500, color: '#1A1A1A', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <Settings size={16} /> Editar
+                </button>
+              )}
+              <button onClick={onClose} style={{ padding: 8, borderRadius: 8 }}><X size={20} /></button>
+            </div>
           </div>
 
           <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
@@ -1809,7 +1982,10 @@ function ClientDetail({ cliente, onClose, visitas, agendamentos, onRegistrarVisi
                   {agendamentos.map(a => (
                     <div key={a.id} style={{ padding: 10, background: '#FAEEDA', borderRadius: 8, marginBottom: 6, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
                       <Clock size={14} style={{ color: '#BA7517' }} />
-                      <span style={{ color: '#633806', fontWeight: 500 }}>{new Date(a.data + 'T12:00').toLocaleDateString('pt-BR')} às {a.hora}</span>
+                      <span style={{ color: '#633806', fontWeight: 500, flex: 1 }}>{new Date(a.data + 'T12:00').toLocaleDateString('pt-BR')} às {a.hora}</span>
+                      <button onClick={() => onExcluirAgendamento(a.id)} title="Excluir agendamento" style={{ padding: 4, color: '#791F1F', display: 'flex' }}>
+                        <Trash2 size={14} />
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -1828,7 +2004,7 @@ function ClientDetail({ cliente, onClose, visitas, agendamentos, onRegistrarVisi
                           color: ativo ? 'white' : CAT_STYLES[c].text,
                           border: `1px solid ${CAT_STYLES[c].border}`
                         }}>
-                        {c} · {CAT_STYLES[c].label}
+                        {CAT_STYLES[c].label}
                       </button>
                     );
                   })}
@@ -1839,6 +2015,19 @@ function ClientDetail({ cliente, onClose, visitas, agendamentos, onRegistrarVisi
 
           {tab === 'visita' && (
             <div>
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 8 }}>Data da visita</label>
+                <input
+                  type="date"
+                  value={dataVisita}
+                  max={new Date().toISOString().slice(0,10)}
+                  onChange={e => setDataVisita(e.target.value)}
+                  style={{ width: '100%', padding: 12, border: '1px solid #E5E3DC', borderRadius: 8, fontSize: 14 }}
+                />
+                <div style={{ fontSize: 11, color: '#888780', marginTop: 4 }}>
+                  {dataVisita === new Date().toISOString().slice(0,10) ? '📍 Hoje' : '📅 Registrando visita retroativa'}
+                </div>
+              </div>
               <div style={{ marginBottom: 16 }}>
                 <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 8 }}>Resultado</label>
                 <div className="grid-cols-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
@@ -1898,9 +2087,14 @@ function ClientDetail({ cliente, onClose, visitas, agendamentos, onRegistrarVisi
                 const d = new Date(v.data);
                 return (
                   <div key={v.id} style={{ padding: 14, background: '#FAFAF7', borderRadius: 10, marginBottom: 8 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, gap: 8 }}>
                       <div style={{ fontSize: 12, fontWeight: 600, textTransform: 'capitalize' }}>{v.resultado.replace('_', ' ')}</div>
-                      <div style={{ fontSize: 11, color: '#888780' }}>{d.toLocaleDateString('pt-BR')}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <div style={{ fontSize: 11, color: '#888780' }}>{d.toLocaleDateString('pt-BR')}</div>
+                        <button onClick={() => onExcluirVisita(v.id)} title="Excluir visita" style={{ padding: 4, color: '#791F1F', display: 'flex' }}>
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
                     </div>
                     <div style={{ fontSize: 13, color: '#444441', lineHeight: 1.5 }}>{v.obs}</div>
                   </div>
@@ -1908,6 +2102,197 @@ function ClientDetail({ cliente, onClose, visitas, agendamentos, onRegistrarVisi
               })}
             </div>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============ CLIENTE FORM (novo/editar) ============
+function ClienteForm({ clienteExistente, onClose, onSalvar }) {
+  const modoEdicao = !!clienteExistente;
+  const [form, setForm] = useState({
+    nome: clienteExistente?.nome || '',
+    endereco: clienteExistente?.endereco || '',
+    rua: clienteExistente?.rua || '',
+    bairro: clienteExistente?.bairro || '',
+    cidade: clienteExistente?.cidade || '',
+    cep: clienteExistente?.cep || '',
+    comprador: clienteExistente?.comprador || '',
+    telefone: clienteExistente?.telefone || '',
+    tratativa: clienteExistente?.tratativa || '',
+    categoria: clienteExistente?.categoria || 'C'
+  });
+  const [salvando, setSalvando] = useState(false);
+
+  const handleSubmit = async () => {
+    if (!form.nome.trim()) {
+      alert('O nome do cliente é obrigatório.');
+      return;
+    }
+    setSalvando(true);
+    await onSalvar(form);
+    setSalvando(false);
+  };
+
+  const set = (campo, valor) => setForm(prev => ({ ...prev, [campo]: valor }));
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200, padding: 16 }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: 'white', borderRadius: 16, width: '100%', maxWidth: 560, maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ padding: '20px 24px', borderBottom: '1px solid #E5E3DC', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>
+            {modoEdicao ? 'Editar cliente' : 'Novo cliente'}
+          </h2>
+          <button onClick={onClose} style={{ padding: 4 }}><X size={20} /></button>
+        </div>
+
+        <div style={{ padding: 24, overflowY: 'auto', flex: 1 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div>
+              <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 6 }}>Nome do cliente *</label>
+              <input type="text" value={form.nome} onChange={e => set('nome', e.target.value)} placeholder="Ex: Depósito São João"
+                style={{ width: '100%', padding: 10, border: '1px solid #E5E3DC', borderRadius: 8, fontSize: 14 }} />
+            </div>
+
+            <div>
+              <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 6 }}>Endereço completo</label>
+              <input type="text" value={form.endereco} onChange={e => set('endereco', e.target.value)} placeholder="Ex: Av. das Flores, 123 - Centro, São Bernardo do Campo - SP, 09700-000"
+                style={{ width: '100%', padding: 10, border: '1px solid #E5E3DC', borderRadius: 8, fontSize: 14 }} />
+              <div style={{ fontSize: 11, color: '#888780', marginTop: 4 }}>Esse é o que aparece no botão de rota. Preenche bairro e cidade abaixo também pra aparecer nos filtros.</div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 6 }}>Bairro</label>
+                <input type="text" value={form.bairro} onChange={e => set('bairro', e.target.value)} placeholder="Centro"
+                  style={{ width: '100%', padding: 10, border: '1px solid #E5E3DC', borderRadius: 8, fontSize: 14 }} />
+              </div>
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 6 }}>Cidade</label>
+                <input type="text" value={form.cidade} onChange={e => set('cidade', e.target.value)} placeholder="São Bernardo do Campo"
+                  style={{ width: '100%', padding: 10, border: '1px solid #E5E3DC', borderRadius: 8, fontSize: 14 }} />
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 6 }}>CEP</label>
+                <input type="text" value={form.cep} onChange={e => set('cep', e.target.value)} placeholder="09700-000"
+                  style={{ width: '100%', padding: 10, border: '1px solid #E5E3DC', borderRadius: 8, fontSize: 14 }} />
+              </div>
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 6 }}>Categoria</label>
+                <select value={form.categoria} onChange={e => set('categoria', e.target.value)}
+                  style={{ width: '100%', padding: 10, border: '1px solid #E5E3DC', borderRadius: 8, fontSize: 14, background: 'white' }}>
+                  <option value="A">Grande</option>
+                  <option value="B">Médio</option>
+                  <option value="C">Pequeno</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 6 }}>Comprador / contato</label>
+              <input type="text" value={form.comprador} onChange={e => set('comprador', e.target.value)} placeholder="Nome do responsável"
+                style={{ width: '100%', padding: 10, border: '1px solid #E5E3DC', borderRadius: 8, fontSize: 14 }} />
+            </div>
+
+            <div>
+              <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 6 }}>Telefone</label>
+              <input type="text" value={form.telefone} onChange={e => set('telefone', e.target.value)} placeholder="(11) 99999-9999"
+                style={{ width: '100%', padding: 10, border: '1px solid #E5E3DC', borderRadius: 8, fontSize: 14 }} />
+            </div>
+
+            <div>
+              <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 6 }}>Tratativa / observações</label>
+              <textarea value={form.tratativa} onChange={e => set('tratativa', e.target.value)} rows={3} placeholder="Histórico, produtos de interesse, próximos passos..."
+                style={{ width: '100%', padding: 10, border: '1px solid #E5E3DC', borderRadius: 8, fontSize: 14, resize: 'vertical', fontFamily: 'inherit' }} />
+            </div>
+          </div>
+        </div>
+
+        <div style={{ padding: '16px 24px', borderTop: '1px solid #E5E3DC', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button onClick={onClose} className="btn-secondary" disabled={salvando}>Cancelar</button>
+          <button onClick={handleSubmit} className="btn-primary" disabled={salvando || !form.nome.trim()}>
+            {salvando ? 'Salvando...' : (modoEdicao ? 'Salvar alterações' : 'Cadastrar cliente')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============ LOGIN SCREEN ============
+function LoginScreen({ onLogin }) {
+  const [senha, setSenha] = useState('');
+  const [erro, setErro] = useState(false);
+  const [carregando, setCarregando] = useState(false);
+
+  const handleSubmit = (e) => {
+    if (e) e.preventDefault();
+    if (!senha.trim()) return;
+    setCarregando(true);
+    setTimeout(() => {
+      const ok = onLogin(senha);
+      if (!ok) {
+        setErro(true);
+        setSenha('');
+        setCarregando(false);
+      }
+    }, 300);
+  };
+
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#1A1A1A', padding: 16 }}>
+      <div style={{ width: '100%', maxWidth: 380 }}>
+        <div style={{ textAlign: 'center', marginBottom: 32 }}>
+          <div style={{ fontSize: 48, fontWeight: 700, color: 'white', letterSpacing: '-0.03em', marginBottom: 8 }}>ROTA<span style={{ color: '#BA7517' }}>.</span></div>
+          <div style={{ fontSize: 13, color: '#888780' }}>Gestão de carteira de clientes</div>
+        </div>
+
+        <div style={{ background: 'white', borderRadius: 16, padding: 28 }}>
+          <h1 style={{ margin: '0 0 6px', fontSize: 20, fontWeight: 700 }}>Acessar o app</h1>
+          <p style={{ margin: '0 0 20px', fontSize: 13, color: '#888780' }}>Digite sua senha para continuar.</p>
+
+          <div>
+            <label style={{ fontSize: 12, fontWeight: 600, display: 'block', marginBottom: 6 }}>Senha</label>
+            <input
+              type="password"
+              value={senha}
+              onChange={e => { setSenha(e.target.value); setErro(false); }}
+              onKeyDown={e => { if (e.key === 'Enter') handleSubmit(); }}
+              autoFocus
+              placeholder="Digite a senha"
+              style={{
+                width: '100%',
+                padding: 12,
+                border: `1px solid ${erro ? '#E24B4A' : '#E5E3DC'}`,
+                borderRadius: 10,
+                fontSize: 15,
+                outline: 'none',
+                marginBottom: 4
+              }}
+            />
+            {erro && (
+              <div style={{ fontSize: 12, color: '#791F1F', marginTop: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <AlertCircle size={12} /> Senha incorreta. Tente novamente.
+              </div>
+            )}
+          </div>
+
+          <button
+            onClick={handleSubmit}
+            disabled={!senha.trim() || carregando}
+            className="btn-primary"
+            style={{ width: '100%', marginTop: 16, opacity: (!senha.trim() || carregando) ? 0.5 : 1 }}
+          >
+            {carregando ? 'Entrando...' : 'Entrar'}
+          </button>
+        </div>
+
+        <div style={{ textAlign: 'center', marginTop: 20, fontSize: 11, color: '#5F5E5A' }}>
+          O acesso fica salvo por 30 dias neste dispositivo.
         </div>
       </div>
     </div>
