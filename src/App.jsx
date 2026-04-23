@@ -244,14 +244,14 @@ function AppInterno({ onLogout }) {
       // DEDUPE: se a planilha tem o mesmo cliente repetido, mantém só a última aparição
       // (que geralmente tem a tratativa mais recente)
       const novosDeduplicados = [];
-      const vistos = new Map(); // nome normalizado -> índice no array
+      const vistos = {}; // nome normalizado -> índice no array (objeto pra evitar conflito com icone Map)
       novos.forEach(n => {
         const key = n.nome.trim().toLowerCase();
-        if (vistos.has(key)) {
+        if (key in vistos) {
           // Substitui a anterior pela mais recente
-          novosDeduplicados[vistos.get(key)] = n;
+          novosDeduplicados[vistos[key]] = n;
         } else {
-          vistos.set(key, novosDeduplicados.length);
+          vistos[key] = novosDeduplicados.length;
           novosDeduplicados.push(n);
         }
       });
